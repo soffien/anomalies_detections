@@ -1,0 +1,39 @@
+cfg: !!python/object/apply:types.SimpleNamespace
+  state:
+    general: !!python/object/apply:types.SimpleNamespace
+      state:
+        data_dir: data/individual_snapshots
+        dataset: uci
+        device: cpu
+        name: digress
+        seed: 42
+    model: !!python/object/apply:types.SimpleNamespace
+      state:
+        dropout: 0.1
+        hidden_dim: 64
+        hidden_dims: !!python/tuple
+        - 64
+        - 32
+        - 16
+        input_dims: &id001 !!python/tuple
+        - 100
+        - 100
+        - 1
+        n_heads: 2
+        n_layers: 2
+        num_diffusion_steps: 500
+        num_layers: 2
+        num_timesteps: 500
+        output_dims: *id001
+        time_embedding_dim: 16
+    train: !!python/object/apply:types.SimpleNamespace
+      state:
+        batch_size: 4
+        edge_weight: 1.0
+        epochs: 2
+        global_weight: 0.5
+        log_steps: 10
+        lr: 0.0001
+        min_lr: 1.0e-06
+        node_weight: 1.0
+        weight_decay: 1.0e-05
