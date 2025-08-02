@@ -1,35 +1,67 @@
 import numpy as np
 import os
 import torch
+from typing import List, Tuple, Dict, Optional
+import logging
+from pathlib import Path
 
-# modifier la methode d'enregistrement en un fichier .pt
-# compter dynamically les catégories de nœuds dans chaque snapshot
-# et le nombre total de catégories possibles
-# annuler le stockage des snapshots de graphes dynamiques (remplacer les methodes a haute complexité par des heurestiques ou des mlp apprenables)
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 class SnapshotGenerator:
     """Générateur de snapshots pour datasets de graphes dynamiques"""
     
     def __init__(self, data_dir: str = "data"):
-        self.data_dir = data_dir     
+        self.data_dir = Path(data_dir)     
         self.total_categories = 6
+        self.supported_datasets = ['uci', 'digg', 'bitcoinalpha', 'bitcoinotc']
+        
+        # Validate data directory
+        if not self.data_dir.exists():
+            raise FileNotFoundError(f"Data directory not found: {self.data_dir}")
+            
+        logger.info(f"SnapshotGenerator initialized with data_dir: {self.data_dir}")
     
-    def _load_dataset(self, dataset: str):
+    def _validate_dataset(self, dataset: str) -> None:
+        """Validate dataset name"""
+        if dataset not in self.supported_datasets:
+            raise ValueError(f"Dataset '{dataset}' not supported. Available: {self.supported_datasets}")
+    
+    def _load_dataset(self, dataset: str) -> Tuple[List[int], np.ndarray, np.ndarray, List[Tuple[int, int]]]:
         """Charge un dataset et retourne (nœuds, arêtes, timestamps, unique_edges)"""
-        if dataset == 'digg' or dataset == 'uci':
-            file_path = os.path.join(self.data_dir, 'digg.txt')
-            data = np.loadtxt(file_path, dtype=int, comments='%')
-            edges = data[:, 0:2]
-            timestamps = data[:, 3].astype(int) 
-        elif dataset == 'bitcoinalpha' or dataset == 'bitcoinotc':
-            # Pour bitcoinalpha et bitcoinotc, on charge les données CSV
-            file_path = os.path.join(self.data_dir, 'soc-sign-bitcoinalpha.csv')
-            with open(file_path) as f:
-                lines = f.read().splitlines()
-            data = np.array([[float(r) for r in row.split(',')] for row in lines])
-            edges = data[:, 0:2].astype(int)
-            timestamps = data[:, 3].astype(int)
-        else:
-            raise ValueError(f"Dataset {dataset} non reconnu")
+        self._validate_dataset(dataset)
+        
+        try:
+            if dataset == 'digg' or dataset == 'uci':
+                file_path = self.data_dir / 'digg.txt'
+                if not file_path.exists():
+                    raise FileNotFoundError(f"Dataset file not found: {file_path}")
+                data = np.loadtxt(file_path, dtype=int, comments='%')
+                edges = data[:, 0:2]
+                timestamps = data[:, 3].astype(int) 
+            elif dataset == 'bitcoinalpha' or dataset == 'bitcoinotc':
+                # Pour bitcoinalpha et bitcoinotc, on charge les données CSV
+                file_path = self.data_dir / 'soc-sign-bitcoinalpha.csv'
+                if not file_path.exists():
+                    raise FileNotFoundError(f"Dataset file not found: {file_path}")
+                with open(file_path) as f:
+                    lines = f.read().splitlines()
+                data = np.array([[float(r) for r in row.split(',')] for row in lines])
+                edges = data[:, 0:2].astype(int)
+                timestamps = data[:, 3].astype(int)
+            else:
+                raise ValueError(f"Dataset {dataset} non reconnu")
+            
+            # Validate loaded data
+            if len(edges) == 0:
+                raise ValueError(f"No edges found in dataset {dataset}")
+            if len(timestamps) != len(edges):
+                raise ValueError(f"Timestamps and edges length mismatch in {dataset}")
+            
+        except Exception as e:
+            logger.error(f"Error loading dataset {dataset}: {e}")
+            raise
         
         # Extraire tous les nœuds uniques
         all_nodes = set()
@@ -41,6 +73,7 @@ class SnapshotGenerator:
         nodes = list(all_nodes)
         unique_edges = list(all_edges_unique)
         
+        logger.info(f"Dataset {dataset} loaded: {len(nodes)} nodes, {len(unique_edges)} unique edges, {len(timestamps)} timestamps")
         return nodes, edges, timestamps, unique_edges
 
     def _create_snapshot_tensors(self, snapshot_edges, global_nodes, unique_edges):
@@ -117,8 +150,10 @@ class SnapshotGenerator:
         
         # Calculer fenêtres temporelles
         unique_timestamps = len(set(timestamps))
-        window_size = unique_timestamps // 10
-        step_size = unique_timestamps // 50
+        window_size = max(1, unique_timestamps // 10)  # Ensure minimum window size
+        step_size = max(1, unique_timestamps // 50)    # Ensure minimum step size
+        
+        logger.info(f"Processing {dataset}: {unique_timestamps} unique timestamps, window_size={window_size}, step_size={step_size}")
         
         # Trier par timestamps
         sorted_indices = np.argsort(timestamps)
@@ -141,6 +176,11 @@ class SnapshotGenerator:
             if len(snapshot_edges) > 0:
                 X, E = self._create_snapshot_tensors(snapshot_edges, global_nodes, unique_edges)
                 
+                # Validate generated data
+                if not self.validate_snapshot_data(X, E):
+                    logger.warning(f"Invalid snapshot data generated for {dataset} at snapshot {snapshot_id}")
+                    continue
+                
                 snapshot_data = {
                     'snapshot_id': snapshot_id,
                     'X': X,
@@ -150,8 +190,10 @@ class SnapshotGenerator:
                 }
                 
                 torch.save(snapshot_data, os.path.join(output_dir, f'snapshot_{snapshot_id}.pt'))
-                print(f"Snapshot {snapshot_id} sauvegardé pour {dataset}")
+                logger.debug(f"Snapshot {snapshot_id} saved for {dataset}")
                 snapshot_id += 1
+        
+        logger.info(f"Generated {snapshot_id} snapshots for dataset {dataset}")
 
     def get_snapshot_categories_count(self, snapshot_file: str) -> int:
         """Retourne le nombre de catégories dans un snapshot"""
@@ -160,13 +202,52 @@ class SnapshotGenerator:
     def get_total_categories_count(self) -> int:
         """Retourne le nombre total de catégories possibles"""
         return self.total_categories
+    
+    def get_dataset_stats(self, dataset: str) -> Dict[str, int]:
+        """Get statistics for a dataset"""
+        try:
+            nodes, edges, timestamps, unique_edges = self._load_dataset(dataset)
+            return {
+                'num_nodes': len(nodes),
+                'num_edges': len(edges),
+                'num_unique_edges': len(unique_edges),
+                'num_timestamps': len(set(timestamps)),
+                'time_span': max(timestamps) - min(timestamps) if timestamps else 0
+            }
+        except Exception as e:
+            logger.error(f"Error getting stats for {dataset}: {e}")
+            return {}
+    
+    def validate_snapshot_data(self, X: torch.Tensor, E: torch.Tensor) -> bool:
+        """Validate snapshot tensor data"""
+        if X.dim() != 2 or X.size(1) != 2:
+            logger.error(f"Invalid X tensor shape: {X.shape}, expected [N, 2]")
+            return False
+        
+        if E.dim() != 2 or E.size(1) != 3:
+            logger.error(f"Invalid E tensor shape: {E.shape}, expected [M, 3]")
+            return False
+        
+        if torch.any(X[:, 1] >= self.total_categories):
+            logger.error("Node categories exceed total_categories")
+            return False
+        
+        if torch.any(E[:, 2] > 1):
+            logger.error("Edge values should be 0 or 1")
+            return False
+        
+        return True
 
     def process_all_datasets(self):
         """Traite tous les datasets disponibles"""
-        for dataset in ['uci', 'digg', 'bitcoinalpha', 'bitcoinotc']:
-            print(f"Traitement du dataset {dataset}...")
-            self._process_dataset(dataset)
-            print(f"Dataset {dataset} traité avec succès")
+        for dataset in self.supported_datasets:
+            try:
+                logger.info(f"Processing dataset {dataset}...")
+                self._process_dataset(dataset)
+                logger.info(f"Dataset {dataset} processed successfully")
+            except Exception as e:
+                logger.error(f"Failed to process dataset {dataset}: {e}")
+                continue
 
 if __name__ == "__main__":
     generator = SnapshotGenerator()
